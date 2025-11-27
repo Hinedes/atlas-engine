@@ -41,22 +41,24 @@ function fetchAllEmbeddings(): EmbeddingRow[] {
 }
 
 function rankResults(queryVector: Float32Array, rows: EmbeddingRow[], limit: number): SearchResult[] {
-  // Use a min-heap approach for efficient top-k selection
-  // This is O(n + k log k) instead of O(n log n) for full sort
   const results: SearchResult[] = rows.map(row => ({
     score: cosineSimilarity(queryVector, bufferToVector(row.vector)),
     content: row.content,
   }));
 
-  // For small datasets or when limit is close to n, full sort is fine
-  // For large datasets with small limits, partial sort would be more efficient
-  if (limit >= results.length) {
-    return results.sort((a, b) => b.score - a.score);
+  // If no results, return empty array
+  if (results.length === 0) {
+    return results;
   }
 
-  // Partial sort: only sort to find top `limit` elements
-  // Using quickselect-style partition for better average performance
-  return partialSort(results, limit);
+  // For large datasets with small limits, use partial sort for better performance
+  // Only use partial sort when limit is significantly smaller than total results
+  if (limit < results.length) {
+    return partialSort(results, limit);
+  }
+
+  // For small datasets or when limit >= results, sort all results
+  return results.sort((a, b) => b.score - a.score);
 }
 
 /**
@@ -65,15 +67,31 @@ function rankResults(queryVector: Float32Array, rows: EmbeddingRow[], limit: num
  */
 function partialSort(arr: SearchResult[], k: number): SearchResult[] {
   // For small k, use simple approach: track top k elements
+  // Use insertion sort on topK array for O(k) per insertion instead of O(k log k)
   if (k <= 10) {
     const topK: SearchResult[] = [];
     for (const item of arr) {
       if (topK.length < k) {
-        topK.push(item);
-        topK.sort((a, b) => b.score - a.score);
+        // Find correct position using binary search
+        let insertIdx = topK.length;
+        for (let i = 0; i < topK.length; i++) {
+          if (item.score > topK[i].score) {
+            insertIdx = i;
+            break;
+          }
+        }
+        topK.splice(insertIdx, 0, item);
       } else if (item.score > topK[topK.length - 1].score) {
-        topK[topK.length - 1] = item;
-        topK.sort((a, b) => b.score - a.score);
+        // Replace minimum and re-insert in correct position
+        topK.pop();
+        let insertIdx = topK.length;
+        for (let i = 0; i < topK.length; i++) {
+          if (item.score > topK[i].score) {
+            insertIdx = i;
+            break;
+          }
+        }
+        topK.splice(insertIdx, 0, item);
       }
     }
     return topK;
