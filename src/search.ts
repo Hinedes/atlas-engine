@@ -1,5 +1,6 @@
 import db from './db';
 import { embedText } from './embedder';
+import type Database from 'better-sqlite3';
 
 interface SearchResult {
   score: number;
@@ -29,15 +30,22 @@ function bufferToVector(buffer: Buffer): Float32Array {
   return new Float32Array(buffer.buffer, buffer.byteOffset, buffer.byteLength / 4);
 }
 
-// Prepare statement once for reuse
-const fetchEmbeddingsStmt = db.prepare(`
-  SELECT e.vector, a.content 
-  FROM embeddings e
-  JOIN atoms a ON e.atom_id = a.id
-`);
+// Lazy initialization of prepared statement to avoid errors before schema exists
+let fetchEmbeddingsStmt: Database.Statement<[], EmbeddingRow> | null = null;
+
+function getFetchEmbeddingsStmt(): Database.Statement<[], EmbeddingRow> {
+  if (!fetchEmbeddingsStmt) {
+    fetchEmbeddingsStmt = db.prepare<[], EmbeddingRow>(`
+      SELECT e.vector, a.content 
+      FROM embeddings e
+      JOIN atoms a ON e.atom_id = a.id
+    `);
+  }
+  return fetchEmbeddingsStmt;
+}
 
 function fetchAllEmbeddings(): EmbeddingRow[] {
-  return fetchEmbeddingsStmt.all() as EmbeddingRow[];
+  return getFetchEmbeddingsStmt().all();
 }
 
 function rankResults(queryVector: Float32Array, rows: EmbeddingRow[], limit: number): SearchResult[] {

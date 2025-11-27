@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import db from './db';
 import { embedTextAsBuffer, getEmbedder } from './embedder';
+import type Database from 'better-sqlite3';
 
 const VAULT_DIR = path.join(process.cwd(), 'vault');
 
@@ -24,13 +25,27 @@ function loadDocument(filename: string): string[] {
     .filter(text => text.length > 0);
 }
 
-// Prepare statements once at module level for reuse
-const insertAtomStmt = db.prepare(`INSERT INTO atoms (content) VALUES (?)`);
-const insertEmbeddingStmt = db.prepare(`INSERT INTO embeddings (atom_id, vector) VALUES (?, ?)`);
+// Lazy initialization of prepared statements to avoid errors before schema exists
+let insertAtomStmt: Database.Statement<[string]> | null = null;
+let insertEmbeddingStmt: Database.Statement<[number | bigint, Buffer]> | null = null;
+
+function getInsertAtomStmt(): Database.Statement<[string]> {
+  if (!insertAtomStmt) {
+    insertAtomStmt = db.prepare<[string]>(`INSERT INTO atoms (content) VALUES (?)`);
+  }
+  return insertAtomStmt;
+}
+
+function getInsertEmbeddingStmt(): Database.Statement<[number | bigint, Buffer]> {
+  if (!insertEmbeddingStmt) {
+    insertEmbeddingStmt = db.prepare<[number | bigint, Buffer]>(`INSERT INTO embeddings (atom_id, vector) VALUES (?, ?)`);
+  }
+  return insertEmbeddingStmt;
+}
 
 function saveAtom(content: string, vector: Buffer): AtomResult {
-  const info = insertAtomStmt.run(content);
-  insertEmbeddingStmt.run(info.lastInsertRowid, vector);
+  const info = getInsertAtomStmt().run(content);
+  getInsertEmbeddingStmt().run(info.lastInsertRowid, vector);
 
   return { id: info.lastInsertRowid, content };
 }
