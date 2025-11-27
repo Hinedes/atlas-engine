@@ -1,5 +1,5 @@
 import db from './db';
-import { pipeline, type FeatureExtractionPipeline } from '@xenova/transformers';
+import { embedText, bufferToVector } from './embedder';
 
 interface SearchResult {
   score: number;
@@ -25,18 +25,6 @@ function cosineSimilarity(a: Float32Array, b: Float32Array): number {
   return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
 }
 
-async function initializeEmbedder(): Promise<FeatureExtractionPipeline> {
-  const embedder = await pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2', {
-    quantized: true,
-  });
-  return embedder as FeatureExtractionPipeline;
-}
-
-async function embedQuery(embedder: FeatureExtractionPipeline, query: string): Promise<Float32Array> {
-  const output = await embedder(query, { pooling: 'mean', normalize: true });
-  return output.data as Float32Array;
-}
-
 function fetchAllEmbeddings(): EmbeddingRow[] {
   const stmt = db.prepare(`
     SELECT e.vector, a.content 
@@ -44,10 +32,6 @@ function fetchAllEmbeddings(): EmbeddingRow[] {
     JOIN atoms a ON e.atom_id = a.id
   `);
   return stmt.all() as EmbeddingRow[];
-}
-
-function bufferToVector(buffer: Buffer): Float32Array {
-  return new Float32Array(buffer.buffer, buffer.byteOffset, buffer.byteLength / 4);
 }
 
 function rankResults(queryVector: Float32Array, rows: EmbeddingRow[]): SearchResult[] {
@@ -70,8 +54,7 @@ function displayResults(results: SearchResult[], limit = 3): void {
 export async function search(query: string, limit = 3): Promise<SearchResult[]> {
   console.log(`\n🔍 Searching Neural Memory for: "${query}"`);
 
-  const embedder = await initializeEmbedder();
-  const queryVector = await embedQuery(embedder, query);
+  const queryVector = await embedText(query);
   const rows = fetchAllEmbeddings();
   const results = rankResults(queryVector, rows);
 

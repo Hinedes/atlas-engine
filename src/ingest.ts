@@ -1,22 +1,13 @@
 import fs from 'fs';
 import path from 'path';
 import db from './db';
-import { pipeline, type FeatureExtractionPipeline } from '@xenova/transformers';
+import { embedText, vectorToBuffer } from './embedder';
 
 const VAULT_DIR = path.join(process.cwd(), 'vault');
 
 interface AtomResult {
   id: number | bigint;
   content: string;
-}
-
-async function initializeEmbedder(): Promise<FeatureExtractionPipeline> {
-  console.log('--- Initializing Quantized Semantic Core ---');
-  const embedder = await pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2', {
-    quantized: true,
-  });
-  console.log('Core Active.');
-  return embedder as FeatureExtractionPipeline;
 }
 
 function loadDocument(filename: string): string[] {
@@ -33,11 +24,6 @@ function loadDocument(filename: string): string[] {
     .filter(text => text.length > 0);
 }
 
-async function embedText(embedder: FeatureExtractionPipeline, text: string): Promise<Buffer> {
-  const output = await embedder(text, { pooling: 'mean', normalize: true });
-  return Buffer.from((output.data as Float32Array).buffer);
-}
-
 function saveAtom(content: string, vector: Buffer): AtomResult {
   const insertAtom = db.prepare(`INSERT INTO atoms (content) VALUES (?)`);
   const insertEmbedding = db.prepare(`INSERT INTO embeddings (atom_id, vector) VALUES (?, ?)`);
@@ -50,14 +36,13 @@ function saveAtom(content: string, vector: Buffer): AtomResult {
 
 export async function ingest(filename = 'briefing.md'): Promise<void> {
   try {
-    const embedder = await initializeEmbedder();
     const atoms = loadDocument(filename);
 
     console.log(`Processing ${atoms.length} atoms...`);
 
     for (const text of atoms) {
-      const vector = await embedText(embedder, text);
-      const { id } = saveAtom(text, vector);
+      const vector = await embedText(text);
+      const { id } = saveAtom(text, vectorToBuffer(vector));
       console.log(`> Atom ${id} vectorized.`);
     }
 
