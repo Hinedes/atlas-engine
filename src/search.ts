@@ -1,5 +1,5 @@
 import db from './db';
-import { pipeline, type FeatureExtractionPipeline } from '@xenova/transformers';
+import { embedText } from './embedder';
 
 interface SearchResult {
   score: number;
@@ -25,38 +25,80 @@ function cosineSimilarity(a: Float32Array, b: Float32Array): number {
   return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
 }
 
-async function initializeEmbedder(): Promise<FeatureExtractionPipeline> {
-  const embedder = await pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2', {
-    quantized: true,
-  });
-  return embedder as FeatureExtractionPipeline;
-}
-
-async function embedQuery(embedder: FeatureExtractionPipeline, query: string): Promise<Float32Array> {
-  const output = await embedder(query, { pooling: 'mean', normalize: true });
-  return output.data as Float32Array;
-}
-
-function fetchAllEmbeddings(): EmbeddingRow[] {
-  const stmt = db.prepare(`
-    SELECT e.vector, a.content 
-    FROM embeddings e
-    JOIN atoms a ON e.atom_id = a.id
-  `);
-  return stmt.all() as EmbeddingRow[];
-}
-
 function bufferToVector(buffer: Buffer): Float32Array {
   return new Float32Array(buffer.buffer, buffer.byteOffset, buffer.byteLength / 4);
 }
 
-function rankResults(queryVector: Float32Array, rows: EmbeddingRow[]): SearchResult[] {
-  return rows
-    .map(row => ({
-      score: cosineSimilarity(queryVector, bufferToVector(row.vector)),
-      content: row.content,
-    }))
-    .sort((a, b) => b.score - a.score);
+// Prepare statement once for reuse
+const fetchEmbeddingsStmt = db.prepare(`
+  SELECT e.vector, a.content 
+  FROM embeddings e
+  JOIN atoms a ON e.atom_id = a.id
+`);
+
+function fetchAllEmbeddings(): EmbeddingRow[] {
+  return fetchEmbeddingsStmt.all() as EmbeddingRow[];
+}
+
+function rankResults(queryVector: Float32Array, rows: EmbeddingRow[], limit: number): SearchResult[] {
+  const results: SearchResult[] = rows.map(row => ({
+    score: cosineSimilarity(queryVector, bufferToVector(row.vector)),
+    content: row.content,
+  }));
+
+  // If no results, return empty array
+  if (results.length === 0) {
+    return results;
+  }
+
+  // For large datasets with small limits, use partial sort for better performance
+  // Only use partial sort when limit is significantly smaller than total results
+  if (limit < results.length) {
+    return partialSort(results, limit);
+  }
+
+  // For small datasets or when limit >= results, sort all results
+  return results.sort((a, b) => b.score - a.score);
+}
+
+/**
+ * Efficiently finds top-k elements without fully sorting the array.
+ * Uses a selection algorithm approach.
+ */
+function partialSort(arr: SearchResult[], k: number): SearchResult[] {
+  // For small k, use simple approach: track top k elements
+  // Use insertion sort on topK array for O(k) per insertion instead of O(k log k)
+  if (k <= 10) {
+    const topK: SearchResult[] = [];
+    for (const item of arr) {
+      if (topK.length < k) {
+        // Find correct position using binary search
+        let insertIdx = topK.length;
+        for (let i = 0; i < topK.length; i++) {
+          if (item.score > topK[i].score) {
+            insertIdx = i;
+            break;
+          }
+        }
+        topK.splice(insertIdx, 0, item);
+      } else if (item.score > topK[topK.length - 1].score) {
+        // Replace minimum and re-insert in correct position
+        topK.pop();
+        let insertIdx = topK.length;
+        for (let i = 0; i < topK.length; i++) {
+          if (item.score > topK[i].score) {
+            insertIdx = i;
+            break;
+          }
+        }
+        topK.splice(insertIdx, 0, item);
+      }
+    }
+    return topK;
+  }
+  
+  // For larger k, full sort is acceptable
+  return arr.sort((a, b) => b.score - a.score).slice(0, k);
 }
 
 function displayResults(results: SearchResult[], limit = 3): void {
@@ -70,10 +112,9 @@ function displayResults(results: SearchResult[], limit = 3): void {
 export async function search(query: string, limit = 3): Promise<SearchResult[]> {
   console.log(`\n🔍 Searching Neural Memory for: "${query}"`);
 
-  const embedder = await initializeEmbedder();
-  const queryVector = await embedQuery(embedder, query);
+  const queryVector = await embedText(query);
   const rows = fetchAllEmbeddings();
-  const results = rankResults(queryVector, rows);
+  const results = rankResults(queryVector, rows, limit);
 
   displayResults(results, limit);
   return results;
