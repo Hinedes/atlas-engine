@@ -1,83 +1,79 @@
 import fs from 'fs';
 import path from 'path';
 import db from './db';
-import { embedTextAsBuffer, getEmbedder } from './embedder';
-import type Database from 'better-sqlite3';
+import { pipeline } from '@xenova/transformers';
 
+// Configuration
 const VAULT_DIR = path.join(process.cwd(), 'vault');
 
-interface AtomResult {
-  id: number | bigint;
-  content: string;
-}
+// Recursive file scanner
+const getFiles = (dir: string): string[] => {
+  const dirents = fs.readdirSync(dir, { withFileTypes: true });
+  const files = dirents.map((dirent) => {
+    const res = path.resolve(dir, dirent.name);
+    return dirent.isDirectory() ? getFiles(res) : res;
+  });
+  return Array.prototype.concat(...files);
+};
 
-function loadDocument(filename: string): string[] {
-  const filePath = path.join(VAULT_DIR, filename);
+export const ingest = async () => {
+  // 1. Hygiene: Clear the deck
+  console.log('--- Purging Database ---');
+  db.prepare('DELETE FROM embeddings').run();
+  db.prepare('DELETE FROM atoms').run();
   
-  if (!fs.existsSync(filePath)) {
-    throw new Error(`File not found: ${filePath}`);
+  // 2. Initialize AI
+  console.log('--- Initializing Semantic Core ---');
+  const embedder = await pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2', {
+    quantized: true,
+  });
+
+  // 3. Scan the Vault
+  console.log(`--- Scanning Sector: ${VAULT_DIR} ---`);
+  if (!fs.existsSync(VAULT_DIR)) {
+    console.error(`Error: Vault directory not found at ${VAULT_DIR}`);
+    return;
   }
 
-  const content = fs.readFileSync(filePath, 'utf-8');
-  return content
-    .split(/\n\s*\n+/)
-    .map(text => text.trim())
-    .filter(text => text.length > 0);
-}
+  const allFiles = getFiles(VAULT_DIR);
+  const targetFiles = allFiles.filter(f => f.endsWith('.md') || f.endsWith('.txt'));
+  
+  console.log(`Targets Acquired: ${targetFiles.length} documents.`);
 
-// Lazy initialization of prepared statements to avoid errors before schema exists
-let insertAtomStmt: Database.Statement<[string]> | null = null;
-let insertEmbeddingStmt: Database.Statement<[number | bigint, Buffer]> | null = null;
+  // Prepare DB Statements
+  // Note: We added 'subnode_id' to the schema earlier, but we'll leave it NULL for now.
+  // We strictly store content and create the embedding.
+  const insertAtom = db.prepare(`INSERT INTO atoms (content) VALUES (?)`);
+  const insertEmbedding = db.prepare(`INSERT INTO embeddings (atom_id, vector) VALUES (?, ?)`);
 
-function getInsertAtomStmt(): Database.Statement<[string]> {
-  if (!insertAtomStmt) {
-    insertAtomStmt = db.prepare<[string]>(`INSERT INTO atoms (content) VALUES (?)`);
-  }
-  return insertAtomStmt;
-}
+  let totalAtoms = 0;
 
-function getInsertEmbeddingStmt(): Database.Statement<[number | bigint, Buffer]> {
-  if (!insertEmbeddingStmt) {
-    insertEmbeddingStmt = db.prepare<[number | bigint, Buffer]>(`INSERT INTO embeddings (atom_id, vector) VALUES (?, ?)`);
-  }
-  return insertEmbeddingStmt;
-}
-
-function saveAtom(content: string, vector: Buffer): AtomResult {
-  const info = getInsertAtomStmt().run(content);
-  getInsertEmbeddingStmt().run(info.lastInsertRowid, vector);
-
-  return { id: info.lastInsertRowid, content };
-}
-
-export async function ingest(filename = 'briefing.md'): Promise<void> {
-  try {
-    // Initialize embedder (uses singleton pattern, so safe to call multiple times)
-    await getEmbedder();
-    const atoms = loadDocument(filename);
-
-    console.log(`Processing ${atoms.length} atoms...`);
-
-    // Pre-compute all embeddings first
-    const embeddings: { text: string; vector: Buffer }[] = [];
-    for (const text of atoms) {
-      const vector = await embedTextAsBuffer(text);
-      embeddings.push({ text, vector });
-    }
-
-    // Batch insert all atoms in a single transaction for better performance
-    const insertAll = db.transaction((items: { text: string; vector: Buffer }[]) => {
-      for (const { text, vector } of items) {
-        const { id } = saveAtom(text, vector);
-        console.log(`> Atom ${id} vectorized.`);
-      }
-    });
+  // 4. Process Files
+  for (const filePath of targetFiles) {
+    const fileName = path.basename(filePath);
+    console.log(`Processing: ${fileName}`);
     
-    insertAll(embeddings);
+    const content = fs.readFileSync(filePath, 'utf-8');
+    
+    // Split by blank lines (The Atomizer)
+    const rawAtoms = content.split(/\n\s*\n+/);
 
-    console.log('--- Ingestion Complete ---');
-  } catch (error) {
-    console.error('Ingestion failed:', error instanceof Error ? error.message : error);
-    throw error;
+    for (const text of rawAtoms) {
+      if (text.trim().length < 10) continue; // Ignore tiny fragments/noise
+      
+      const cleanText = text.trim();
+
+      // A. Generate Vector (Async)
+      const output = await embedder(cleanText, { pooling: 'mean', normalize: true });
+      const vectorBuffer = Buffer.from((output.data as Float32Array).buffer);
+
+      // B. Write to DB (Sync)
+      const info = insertAtom.run(cleanText);
+      insertEmbedding.run(info.lastInsertRowid, vectorBuffer);
+      
+      totalAtoms++;
+    }
   }
-}
+
+  console.log(`--- Mission Complete. ${totalAtoms} Atoms Vectorized. ---`);
+};

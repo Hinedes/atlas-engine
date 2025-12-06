@@ -20,11 +20,11 @@ program
   });
 
 program
-  .command('ingest [filename]')
-  .description('Ingest a document into the knowledge base')
-  .action(async (filename?: string) => {
+  .command('ingest')
+  .description('Ingest all documents from the vault into the knowledge base')
+  .action(async () => {
     initSchema(); // Ensure schema exists
-    await ingest(filename);
+    await ingest();
   });
 
 program

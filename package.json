@@ -2,15 +2,20 @@
   "name": "atlas-engine",
   "version": "1.0.0",
   "description": "Semantic Knowledge Management System",
-  "main": "src/cli.ts",
+  "main": "dist/main.js",
   "bin": {
-    "atlas": "./src/cli.ts"
+    "atlas": "./dist/cli.js"
   },
   "scripts": {
+    "build": "tsc",
+    "start": "node dist/cli.js",
+    "dev": "ts-node src/cli.ts",
     "atlas": "ts-node src/cli.ts",
     "init": "ts-node src/cli.ts init",
     "ingest": "ts-node src/cli.ts ingest",
     "search": "ts-node src/cli.ts search",
+    "clean": "rmdir /s /q dist 2>nul || true",
+    "prepublishOnly": "npm run build",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "repository": {
